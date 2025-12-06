@@ -1,69 +1,96 @@
-# app.py
-from fastapi import FastAPI
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
-DATABASE_URL = "sqlite:///./insurance.db"
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine, Base
+import models
+import schemas
+from passlib.context import CryptContext
 
-# SQLAlchemy setup
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# Models
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    email = Column(String, unique=True, nullable=False)
-    insurances = relationship("Insurance", back_populates="user")
-
-class Car(Base):
-    __tablename__ = "cars"
-    id = Column(Integer, primary_key=True, index=True)
-    make = Column(String, nullable=False)
-    model = Column(String, nullable=False)
-    year = Column(Integer, nullable=False)
-    insurances = relationship("Insurance", back_populates="car")
-
-class Insurance(Base):
-    __tablename__ = "insurances"
-    id = Column(Integer, primary_key=True, index=True)
-    type = Column(String, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    car_id = Column(Integer, ForeignKey("cars.id"))
-
-    user = relationship("User", back_populates="insurances")
-    car = relationship("Car", back_populates="insurances")
-
-# Create tables
+# -----------------------
+# Setup
+# -----------------------
 Base.metadata.create_all(bind=engine)
-
-# FastAPI app
 app = FastAPI()
 
-# Routes
-@app.get("/")
-def read_root():
-    return {"message": "Hello, welcome to the Car Insurance Tracker API!"}
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-@app.get("/users")
-def get_users():
-    db = SessionLocal()
-    users = db.query(User).all()
-    db.close()
-    return users
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
-@app.get("/cars")
-def get_cars():
-    db = SessionLocal()
-    cars = db.query(Car).all()
-    db.close()
-    return cars
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-@app.get("/insurances")
-def get_insurances():
+# DB Dependency
+def get_db():
     db = SessionLocal()
-    insurances = db.query(Insurance).all()
-    db.close()
-    return insurances
+    try:
+        yield db
+    finally:
+        db.close()
+
+# -----------------------
+# USERS
+# -----------------------
+@app.get("/users", response_model=list[schemas.UserSchema])
+def get_users(db: Session = Depends(get_db)):
+    users = db.query(models.User).all()
+    return users  # passwords are excluded in UserSchema
+
+@app.post("/users", response_model=schemas.UserSchema)
+def create_user(user: schemas.UserCreateSchema, db: Session = Depends(get_db)):
+    # Check if username already exists
+    existing_user = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    hashed_password = get_password_hash(user.password)
+    db_user = models.User(username=user.username, password=hashed_password)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+# -----------------------
+# LOGIN
+# -----------------------
+@app.post("/login")
+def login(data: schemas.UserCreateSchema, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == data.username).first()
+    if not user or not verify_password(data.password, user.password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"message": "Login successful"}
+
+
+# -----------------------
+# CARS
+# -----------------------
+@app.get("/cars", response_model=list[schemas.CarSchema])
+def get_cars(db: Session = Depends(get_db)):
+    return db.query(models.Car).all()
+
+
+@app.post("/cars", response_model=schemas.CarSchema)
+def create_car(car: schemas.CarCreateSchema, db: Session = Depends(get_db)):
+    db_car = models.Car(**car.dict())
+    db.add(db_car)
+    db.commit()
+    db.refresh(db_car)
+    return db_car
+
+
+# -----------------------
+# INSURANCES
+# -----------------------
+@app.get("/insurances", response_model=list[schemas.InsuranceSchema])
+def get_insurances(db: Session = Depends(get_db)):
+    return db.query(models.Insurance).all()
+
+
+@app.post("/insurances", response_model=schemas.InsuranceSchema)
+def create_insurance(ins: schemas.InsuranceCreateSchema, db: Session = Depends(get_db)):
+    db_ins = models.Insurance(**ins.dict())
+    db.add(db_ins)
+    db.commit()
+    db.refresh(db_ins)
+    return db_ins
